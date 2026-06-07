@@ -364,3 +364,123 @@ fn main() {
                            &mut total_ticks, &mut state_since_ticks, &mut prev_state);
     print_status(7, &inputs, &outputs, &controller, total_ticks, state_since_ticks);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct DummyLogger;
+    impl Logger for DummyLogger {
+        fn log_event(&mut self, _msg: &'static str) {}
+        fn log_state_change(&mut self, _from: SystemState, _to: SystemState) {}
+    }
+
+    fn setup_active_system() -> (BikeEngineController, DummyLogger) {
+        let mut controller = BikeEngineController::new();
+        let mut logger = DummyLogger;
+        let inputs = SensorInputs { pas_value: 50, speed_value: 15.0, ..Default::default() };
+        controller.update(&inputs, &mut logger);
+        assert_eq!(controller.current_state(), SystemState::AssistOn);
+        (controller, logger)
+    }
+
+    #[test]
+    fn test_sr1_full_brake_cuts_power() {
+        let (mut controller, mut logger) = setup_active_system();
+        
+        let inputs = SensorInputs { pas_value: 50, speed_value: 15.0, brake_value: 100, ..Default::default() };
+        let outputs = controller.update(&inputs, &mut logger);
+        
+        assert_eq!(controller.current_state(), SystemState::EmergencyBraking);
+        assert_eq!(outputs.motor_power, 0, "SR1 FAILED: Silnik nadal podaje moc mimo hamulca!");
+    }
+
+    #[test]
+    fn test_sr2_no_direct_transition_to_assist_on() {
+        let (mut controller, mut logger) = setup_active_system();
+        
+        let inputs_brake = SensorInputs { pas_value: 50, speed_value: 15.0, brake_value: 100, ..Default::default() };
+        controller.update(&inputs_brake, &mut logger);
+
+        let inputs_release = SensorInputs { pas_value: 50, speed_value: 15.0, brake_value: 0, ..Default::default() };
+        controller.update(&inputs_release, &mut logger);
+
+        assert_eq!(controller.current_state(), SystemState::Idle, "SR2 FAILED: Przejście z Braking do AssistOn!");
+    }
+
+    #[test]
+    fn test_sr3_pas_zero_exits_assist_on() {
+        let (mut controller, mut logger) = setup_active_system();
+
+        let inputs = SensorInputs { pas_value: 0, speed_value: 15.0, ..Default::default() };
+        controller.update(&inputs, &mut logger);
+        
+        assert_ne!(controller.current_state(), SystemState::AssistOn, "SR3 FAILED: System pozostał w AssistOn mimo PAS=0");
+        assert_eq!(controller.current_state(), SystemState::AssistPassive);
+    }
+
+    #[test]
+    fn test_sr4_global_fault_forces_fault_state() {
+        let (mut controller, mut logger) = setup_active_system();
+        
+        let mut inputs = SensorInputs { pas_value: 50, speed_value: 15.0, ..Default::default() };
+        inputs.pas_err = true;
+        
+        let outputs = controller.update(&inputs, &mut logger);
+        
+        assert_eq!(controller.current_state(), SystemState::Fault, "SR4 FAILED: Global Fault nie wymusił stanu FAULT");
+        assert_eq!(outputs.motor_power, 0);
+        assert!(outputs.status_led);
+    }
+
+    #[test]
+    fn test_sr5_fault_is_a_latched_state() {
+        let (mut controller, mut logger) = setup_active_system();
+
+        let mut inputs = SensorInputs::default();
+        inputs.speed_err = true;
+        controller.update(&inputs, &mut logger);
+
+        let valid_inputs = SensorInputs { pas_value: 50, speed_value: 15.0, ..Default::default() };
+        let outputs = controller.update(&valid_inputs, &mut logger);
+        
+        assert_eq!(controller.current_state(), SystemState::Fault, "SR5 FAILED: System opuścił stan FAULT programowo!");
+        assert_eq!(outputs.motor_power, 0);
+    }
+
+    #[test]
+    fn test_sr6_pas_hardware_fault() {
+        let (mut c, mut l) = setup_active_system();
+        let mut i = SensorInputs::default(); 
+        i.pas_err = true;
+        c.update(&i, &mut l);
+        assert_eq!(c.current_state(), SystemState::Fault, "SR6 FAILED");
+    }
+
+    #[test]
+    fn test_sr7_brake_hardware_fault() {
+        let (mut c, mut l) = setup_active_system();
+        let mut i = SensorInputs::default(); 
+        i.brake_err = true;
+        c.update(&i, &mut l);
+        assert_eq!(c.current_state(), SystemState::Fault, "SR7 FAILED");
+    }
+
+    #[test]
+    fn test_sr8_speed_hardware_fault() {
+        let (mut c, mut l) = setup_active_system();
+        let mut i = SensorInputs::default(); 
+        i.speed_err = true;
+        c.update(&i, &mut l);
+        assert_eq!(c.current_state(), SystemState::Fault, "SR8 FAILED");
+    }
+
+    #[test]
+    fn test_sr9_battery_hardware_fault() {
+        let (mut c, mut l) = setup_active_system();
+        let mut i = SensorInputs::default(); 
+        i.battery_err = true;
+        c.update(&i, &mut l);
+        assert_eq!(c.current_state(), SystemState::Fault, "SR9 FAILED");
+    }
+}
